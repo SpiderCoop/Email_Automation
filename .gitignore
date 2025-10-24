@@ -1,0 +1,43 @@
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Caches and logs
+.cache
+*.log
+*.tmp
+
+# Virtual environment
+venv/
+*.venv
+.env
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# IDE and editor directories
+.idea/
+.vscode/
+*.swp
+*~
+
+# Node.js dependencies
+node_modules/
+
+# Build artifacts
+/dist/
+/build/
+/target/
+
+# Ignore secrets and credentials
+secrets.yaml
+config/credentials.yml
+
+# Personal files
+Project_toolbox.py
+config_envios.json
+auxiliar_tools/Definir_lista_envio.py
+*.bat
