@@ -19,25 +19,36 @@ from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 
 # Función para enviar correo electrónico
-def send_email(account:str, password:str, recipients:list, subject:str, body:str, files:list = None, inline_images:list = None, signature_file: str = None, smtp_server:str='smtp.office365.com', smtp_port:str=587):
+def send_email(account:str, password:str, subject:str, body:str, direct_recipients:list, copied_recipients:list = [], blind_recipients:list = [], files:list = None, inline_images:list = None, signature_file: str = None, smtp_server:str='smtp.office365.com', smtp_port:str=587):
     """
     Send an email with HTML body, embedded images, and properly typed files.
 
     Params:
         account (str): Sender's email.
         password (str): Sender's email password.
-        recipients (list): List of recipients.
+        direct_recipients (list): List of direct recipients.
+        copied_recipients (list): List of copied recipients.
+        blind_recipients (list): List of blind copied recipients.
         subject (str): Email subject.
         body (str): HTML content of the message.
         files (list): List of file paths to attach.
         inline_images (list): List of image paths to embed in the email body.
+        signature_file (str): Path to HTML signature file.
+        smtp_server (str): SMTP server address.
+        smtp_port (str): SMTP server port.
     """
+
+    if not isinstance(direct_recipients, list) or not isinstance(copied_recipients, list) or not isinstance(blind_recipients, list):
+        return False
 
     # Crear mensaje base (outer multipart/mixed)
     msg_mixed = MIMEMultipart('mixed')
     msg_mixed['From'] = account
-    msg_mixed['To'] = "; ".join(recipients)
+    msg_mixed['To'] = "; ".join(direct_recipients)
+    msg_mixed['Cc'] = "; ".join(copied_recipients)
+    msg_mixed['Bcc'] = "; ".join(blind_recipients)
     msg_mixed['Subject'] = subject
+    success = True
 
     # Procesar imágenes inline y añadirlas al related
     msg_related = MIMEMultipart('related')
@@ -50,7 +61,9 @@ def send_email(account:str, password:str, recipients:list, subject:str, body:str
         for image in inline_images:
             if not os.path.isfile(image):
                 print(f"❌ Image not found: {image}")
+                success = False
                 continue
+
             file_name = os.path.basename(image)
             base_file_name = os.path.splitext(file_name)[0]
             content_id = str(uuid.uuid4())
@@ -90,16 +103,17 @@ def send_email(account:str, password:str, recipients:list, subject:str, body:str
                 img_part.add_header('Content-ID', f'<{cid}>')
                 img_part.add_header('Content-Disposition', 'inline', filename=filename)
                 msg_related.attach(img_part)
+
         except Exception as e:
             print(f"❌ Error attaching inline image {path}: {e}")
-
-
+            success = False
 
     # Adjuntar archivos
     if files:
         for file in files:
             if not os.path.isfile(file):
                 print(f"❌ File not found: {file}")
+                success = False
                 continue
 
             ctype, encoding = mimetypes.guess_type(file)
@@ -118,13 +132,23 @@ def send_email(account:str, password:str, recipients:list, subject:str, body:str
 
 
     # Enviar correo con conexión segura
-    context = ssl.create_default_context()
-    try:
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls(context=context)
-            server.login(account, password)
-            server.sendmail(account, recipients, msg_mixed.as_string())
-        print("✅ Email sent successfully.")
-    except smtplib.SMTPException as e:
-        print(f"❌ Error sending email: {e}")
+    # Obtener todos los destinatarios (to + cc + bcc)
+    all_recipients = direct_recipients + copied_recipients + blind_recipients
+    
+    if success:
+        context = ssl.create_default_context()
+        try:
+            with smtplib.SMTP(smtp_server, smtp_port) as server:
+                server.starttls(context=context)
+                server.login(account, password)
+                server.sendmail(account, all_recipients, msg_mixed.as_string())
 
+            print("✅ Email sent successfully.")
+
+        except smtplib.SMTPException as e:
+            print(f"❌ Error sending email: {e}")
+            success = False
+    else:
+        print("❌ Not sending email due to previous errors.")
+
+    return success
