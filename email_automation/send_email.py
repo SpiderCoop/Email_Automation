@@ -19,7 +19,7 @@ from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 
 # Función para enviar correo electrónico
-def send_email(account:str, password:str, subject:str, body:str, direct_recipients:list, copied_recipients:list = [], blind_recipients:list = [], files:list = None, inline_images:list = None, signature_file: str = None, smtp_server:str='smtp.office365.com', smtp_port:str=587):
+def send_email(account:str, password:str, subject:str, body:str, direct_recipients:list[str], copied_recipients:list[str] = [], blind_recipients:list[str] = [], files:list[str] | None = None, inline_images:list[str] | None = None, signature_file: str | None = None, smtp_server:str='smtp.office365.com', smtp_port:int=587):
     """
     Send an email with HTML body, embedded images, and properly typed files.
 
@@ -38,9 +38,6 @@ def send_email(account:str, password:str, subject:str, body:str, direct_recipien
         smtp_port (str): SMTP server port.
     """
 
-    if not isinstance(direct_recipients, list) or not isinstance(copied_recipients, list) or not isinstance(blind_recipients, list):
-        return False
-
     # Crear mensaje base (outer multipart/mixed)
     msg_mixed = MIMEMultipart('mixed')
     msg_mixed['From'] = account
@@ -56,7 +53,7 @@ def send_email(account:str, password:str, subject:str, body:str, direct_recipien
 
 
     # Procesar inline_images proporcionadas: no las adjuntamos todavía, solo las registramos y modificamos el body
-    images_to_attach = []
+    images_to_attach: list[tuple[str, str, str]] = []
     if inline_images:
         for image in inline_images:
             if not os.path.isfile(image):
