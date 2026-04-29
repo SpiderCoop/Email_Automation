@@ -12,10 +12,7 @@ license = { text = "MIT" }
 authors = [
   { name = "David Jiménez Cooper", email = "david.jimenez.cooper@gmail.com" }
 ]
-urls = {
-  "Homepage" = "https://github.com/SpiderCoop/Email_Automation"
-  "Repository" = "https://github.com/SpiderCoop/Email_Automation"
-}
+urls = { Homepage = "https://github.com/SpiderCoop/Email_Automation", Repository = "https://github.com/SpiderCoop/Email_Automation" }
 classifiers = [
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: MIT License",
@@ -24,3 +21,6 @@ classifiers = [
 dependencies = [
   "python-dotenv"
 ]
+
+[tool.setuptools]
+packages = { find = { where = ["."], include = ["email_automation*"] } }
