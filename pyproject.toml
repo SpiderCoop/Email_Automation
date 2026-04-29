@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "email_automation"
+version = "1.0.0"
+description = "Un paquete con funciones diseñadas para facilitar la conexión con diferentes APIs"
+readme = "README.md"
+requires-python = ">=3.6"
+license = { text = "MIT" }
+authors = [
+  { name = "David Jiménez Cooper", email = "david.jimenez.cooper@gmail.com" }
+]
+urls = {
+  "Homepage" = "https://github.com/SpiderCoop/Email_Automation"
+  "Repository" = "https://github.com/SpiderCoop/Email_Automation"
+}
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent"
+]
+dependencies = [
+  "python-dotenv"
+]
