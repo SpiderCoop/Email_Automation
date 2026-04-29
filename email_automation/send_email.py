@@ -72,7 +72,7 @@ def send_email(account:str, password:str, subject:str, body:str, direct_recipien
     # Si se proporcionó un archivo de firma, se lee y adjunta
     if signature_file:
         if os.path.isfile(signature_file):
-            with open(signature_file, 'r', encoding='latin-1') as sf:
+            with open(signature_file, 'r', encoding='utf-8') as sf:
                 signature_html = sf.read()
         else:
             print(f"❌ Signature file not found: {signature_file}")
