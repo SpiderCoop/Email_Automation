@@ -20,13 +20,14 @@ from email.mime.multipart import MIMEMultipart
 
 # Clase para enviar correo electrónico
 class EmailManager:
-    def __init__(self, account:str, password:str, smtp_server:str='smtp.office365.com', smtp_port:str=587):
+    def __init__(self, account:str, password:str, signature_file: str | None = None, smtp_server:str='smtp.office365.com', smtp_port:str=587):
         self.account = account
         self.__password = password
+        self.signature_file = signature_file
         self.smtp_server = smtp_server
         self.smtp_port = smtp_port
             
-    def send(self, subject:str, body:str, direct_recipients:list[str], copied_recipients:list[str] = [], blind_recipients:list[str] = [], files:list[str] | None = None, inline_images:list[str] | None = None, signature_file: str | None = None) -> bool:
+    def send(self, subject:str, body:str, direct_recipients:list[str], copied_recipients:list[str] = [], blind_recipients:list[str] = [], files:list[str] | None = None, inline_images:list[str] | None = None) -> bool:
         """
         Send an email with HTML body, embedded images, and properly typed files.
 
@@ -38,7 +39,6 @@ class EmailManager:
             blind_recipients (list): List of blind copied recipients.
             files (list): List of file paths to attach.
             inline_images (list): List of image paths to embed in the email body.
-            signature_file (str): Path to HTML signature file.
         Returns:
             bool: True if email was sent successfully, False otherwise.
         """
@@ -75,12 +75,12 @@ class EmailManager:
 
         
         # Si se proporcionó un archivo de firma, se lee y adjunta
-        if signature_file:
-            if os.path.isfile(signature_file):
-                with open(signature_file, 'r', encoding='utf-8') as sf:
+        if self.signature_file:
+            if os.path.isfile(self.signature_file):
+                with open(self.signature_file, 'r', encoding='utf-8') as sf:
                     signature_html = sf.read()
             else:
-                print(f"❌ Signature file not found: {signature_file}")
+                print(f"❌ Signature file not found: {self.signature_file}")
                 signature_html = ''
         else:
             signature_html = ''
