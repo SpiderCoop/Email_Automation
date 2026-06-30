@@ -74,14 +74,19 @@ class EmailManager:
                 body = body.replace(f'cid:{base_file_name}', f'cid:{content_id}')
 
         
-        # Si se proporcionó un archivo de firma, se lee y adjunta
+        # Determinamos el contenido de la firma
         if self.signature_file:
+            # Verificamos si es una ruta a un archivo existente
             if os.path.isfile(self.signature_file):
                 with open(self.signature_file, 'r', encoding='utf-8') as sf:
                     signature_html = sf.read()
+            # Si no es un archivo, verificamos si parece contenido HTML
+            elif "<" in self.signature_file and ">" in self.signature_file:
+                signature_html = self.signature_file
+            # Si no es archivo ni tiene etiquetas HTML, lo tratamos como texto o error
             else:
-                print(f"❌ Signature file not found: {self.signature_file}")
-                signature_html = ''
+                print(f"⚠️ El contenido no es un archivo válido ni parece HTML: {self.signature_file[:30]}...")
+                signature_html = '' 
         else:
             signature_html = ''
 
