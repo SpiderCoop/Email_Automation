@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "email_automation_sc"
-version = "1.0.0"
+version = "1.0.1"
 description = "Un paquete con funciones diseñadas para facilitar la conexión con diferentes APIs"
 readme = "README.md"
 requires-python = ">=3.6"
