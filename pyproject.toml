@@ -1,6 +1,6 @@
 [project]
 name = "email_automation_sc"
-version = "1.0.1"
+version = "1.0.2"
 description = "Un paquete para el envio de correos electronicos automatizados"
 readme = "README.md"
 requires-python = ">=3.6"
