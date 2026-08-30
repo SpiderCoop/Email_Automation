@@ -50,7 +50,6 @@ class EmailManager:
         msg_mixed['Cc'] = "; ".join(copied_recipients)
         msg_mixed['Bcc'] = "; ".join(blind_recipients)
         msg_mixed['Subject'] = subject
-        success = True
 
         # Procesar imágenes inline y añadirlas al related
         msg_related = MIMEMultipart('related')
@@ -62,9 +61,7 @@ class EmailManager:
         if inline_images:
             for image in inline_images:
                 if not os.path.isfile(image):
-                    print(f"❌ Image not found: {image}")
-                    success = False
-                    continue
+                    raise FileNotFoundError(f"❌ Image not found: {image}")
 
                 file_name = os.path.basename(image)
                 base_file_name = os.path.splitext(file_name)[0]
@@ -112,16 +109,13 @@ class EmailManager:
                     msg_related.attach(img_part)
 
             except Exception as e:
-                print(f"❌ Error attaching inline image {path}: {e}")
-                success = False
+                raise FileNotFoundError(f"❌ Error attaching inline image {path}: {e}") from e
 
         # Adjuntar archivos
         if files:
             for file in files:
                 if not os.path.isfile(file):
-                    print(f"❌ File not found: {file}")
-                    success = False
-                    continue
+                    raise FileNotFoundError(f"❌ File not found: {file}")
 
                 ctype, encoding = mimetypes.guess_type(file)
                 if ctype is None or encoding is not None:
@@ -142,20 +136,18 @@ class EmailManager:
         # Obtener todos los destinatarios (to + cc + bcc)
         all_recipients = direct_recipients + copied_recipients + blind_recipients
         
-        if success:
-            context = ssl.create_default_context()
-            try:
-                with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                    server.starttls(context=context)
-                    server.login(self.account, self.__password)
-                    server.sendmail(self.account, all_recipients, msg_mixed.as_string())
+        context = ssl.create_default_context()
+        try:
+            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
+                server.starttls(context=context)
+                server.login(self.account, self.__password)
+                server.sendmail(self.account, all_recipients, msg_mixed.as_string())
 
-                print("✅ Email sent successfully.")
+            print("✅ Email sent successfully.")
 
-            except smtplib.SMTPException as e:
-                print(f"❌ Error sending email: {e}")
-                success = False
-        else:
-            print("❌ Not sending email due to previous errors.")
-
-        return success
+        except smtplib.SMTPException as e:
+            raise RuntimeError(f"❌ SMTP error occurred: {e}") from e
+        except Exception as e:
+            raise RuntimeError(f"❌ An unexpected error occurred while sending email: {e}") from e
+        
+        return True
