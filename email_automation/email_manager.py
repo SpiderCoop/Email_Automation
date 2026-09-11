@@ -1,33 +1,47 @@
-# -*- coding: utf-8 -*-
 """
-Created on Fri Mar 22 21:37:35 2024
-
-@author: DJIMENEZ
+Description:   Manages sending emails with HTML content, inline images, and attachments.
+Author:        David Jiménez Cooper - SpiderCoop
+Date:          2024-03-22
 """
 
-# Librerias necesarias -------------------------------------------------------------------------
-
-import os
-import uuid
-import ssl
-import smtplib
 import mimetypes
+import os
+import smtplib
+import ssl
+import uuid
 from email import encoders
-from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
 
 # Clase para enviar correo electrónico
 class EmailManager:
-    def __init__(self, account:str, password:str, signature_file: str | None = None, smtp_server:str='smtp.office365.com', smtp_port:str=587):
+    def __init__(
+        self,
+        account: str,
+        password: str,
+        signature_file: str | None = None,
+        smtp_server: str = "smtp.office365.com",
+        smtp_port: str = 587,
+    ):
         self.account = account
         self.__password = password
         self.signature_file = signature_file
         self.smtp_server = smtp_server
         self.smtp_port = smtp_port
-            
-    def send(self, subject:str, body:str, direct_recipients:list[str], copied_recipients:list[str] = [], blind_recipients:list[str] = [], files:list[str] | None = None, inline_images:list[str] | None = None) -> bool:
+
+    def send(
+        self,
+        subject: str,
+        body: str,
+        direct_recipients: list[str] | None = None,
+        copied_recipients: list[str] | None = None,
+        blind_recipients: list[str] | None = None,
+        files: list[str] | None = None,
+        inline_images: list[str] | None = None,
+    ) -> bool:
         """
         Send an email with HTML body, embedded images, and properly typed files.
 
@@ -43,18 +57,21 @@ class EmailManager:
             bool: True if email was sent successfully, False otherwise.
         """
 
+        # Checamos que al menos haya un destinatario
+        if not (direct_recipients or copied_recipients or blind_recipients):
+            raise ValueError("❌ At least one recipient must be specified.")
+
         # Crear mensaje base (outer multipart/mixed)
-        msg_mixed = MIMEMultipart('mixed')
-        msg_mixed['From'] = self.account
-        msg_mixed['To'] = "; ".join(direct_recipients)
-        msg_mixed['Cc'] = "; ".join(copied_recipients)
-        msg_mixed['Bcc'] = "; ".join(blind_recipients)
-        msg_mixed['Subject'] = subject
+        msg_mixed = MIMEMultipart("mixed")
+        msg_mixed["From"] = self.account
+        msg_mixed["To"] = "; ".join(direct_recipients) if direct_recipients else ""
+        msg_mixed["Cc"] = "; ".join(copied_recipients) if copied_recipients else ""
+        msg_mixed["Bcc"] = "; ".join(blind_recipients) if blind_recipients else ""
+        msg_mixed["Subject"] = subject
 
         # Procesar imágenes inline y añadirlas al related
-        msg_related = MIMEMultipart('related')
-        msg_alternative = MIMEMultipart('alternative')
-
+        msg_related = MIMEMultipart("related")
+        msg_alternative = MIMEMultipart("alternative")
 
         # Procesar inline_images proporcionadas: no las adjuntamos todavía, solo las registramos y modificamos el body
         images_to_attach: list[tuple[str, str, str]] = []
@@ -67,25 +84,26 @@ class EmailManager:
                 base_file_name = os.path.splitext(file_name)[0]
                 content_id = str(uuid.uuid4())
                 images_to_attach.append((image, content_id, file_name))
-                body = body.replace(f'cid:{file_name}', f'cid:{content_id}')
-                body = body.replace(f'cid:{base_file_name}', f'cid:{content_id}')
+                body = body.replace(f"cid:{file_name}", f"cid:{content_id}")
+                body = body.replace(f"cid:{base_file_name}", f"cid:{content_id}")
 
-        
         # Determinamos el contenido de la firma
         if self.signature_file:
             # Verificamos si es una ruta a un archivo existente
             if os.path.isfile(self.signature_file):
-                with open(self.signature_file, 'r', encoding='utf-8') as sf:
+                with open(self.signature_file, "r", encoding="utf-8") as sf:
                     signature_html = sf.read()
             # Si no es un archivo, verificamos si parece contenido HTML
             elif "<" in self.signature_file and ">" in self.signature_file:
                 signature_html = self.signature_file
             # Si no es archivo ni tiene etiquetas HTML, lo tratamos como texto o error
             else:
-                print(f"⚠️ El contenido no es un archivo válido ni parece HTML: {self.signature_file[:30]}...")
-                signature_html = '' 
+                print(
+                    f"⚠️ The content is not a valid file nor does it appear to be HTML: {self.signature_file[:30]}..."
+                )
+                signature_html = ""
         else:
-            signature_html = ''
+            signature_html = ""
 
         # Añadir la firma al cuerpo
         if "</body>" in body.lower():
@@ -94,22 +112,25 @@ class EmailManager:
             body += signature_html
 
         # Cuerpo HTML
-        msg_alternative.attach(MIMEText(body, 'html', 'utf-8'))
+        msg_alternative.attach(MIMEText(body, "html", "utf-8"))
         msg_related.attach(msg_alternative)
         msg_mixed.attach(msg_related)
-
 
         # Adjuntar las imágenes encontradas al related
         for path, cid, filename in images_to_attach:
             try:
-                with open(path, 'rb') as imgf:
+                with open(path, "rb") as imgf:
                     img_part = MIMEImage(imgf.read(), name=filename)
-                    img_part.add_header('Content-ID', f'<{cid}>')
-                    img_part.add_header('Content-Disposition', 'inline', filename=filename)
+                    img_part.add_header("Content-ID", f"<{cid}>")
+                    img_part.add_header(
+                        "Content-Disposition", "inline", filename=filename
+                    )
                     msg_related.attach(img_part)
 
             except Exception as e:
-                raise FileNotFoundError(f"❌ Error attaching inline image {path}: {e}") from e
+                raise FileNotFoundError(
+                    f"❌ Error attaching inline image {path}: {e}"
+                ) from e
 
         # Adjuntar archivos
         if files:
@@ -119,23 +140,24 @@ class EmailManager:
 
                 ctype, encoding = mimetypes.guess_type(file)
                 if ctype is None or encoding is not None:
-                    ctype = 'application/octet-stream'
-                maintype, subtype = ctype.split('/', 1)
+                    ctype = "application/octet-stream"
+                maintype, subtype = ctype.split("/", 1)
 
-                with open(file, 'rb') as f:
+                with open(file, "rb") as f:
                     mime_part = MIMEBase(maintype, subtype)
                     mime_part.set_payload(f.read())
 
                 encoders.encode_base64(mime_part)
                 file_name = os.path.basename(file)
-                mime_part.add_header('Content-Disposition', f'attachment; filename="{file_name}"')
+                mime_part.add_header(
+                    "Content-Disposition", f'attachment; filename="{file_name}"'
+                )
                 msg_mixed.attach(mime_part)
-
 
         # Enviar correo con conexión segura
         # Obtener todos los destinatarios (to + cc + bcc)
-        all_recipients = direct_recipients + copied_recipients + blind_recipients
-        
+        all_recipients = (direct_recipients or []) + (copied_recipients or []) + (blind_recipients or [])
+
         context = ssl.create_default_context()
         try:
             with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
@@ -148,6 +170,8 @@ class EmailManager:
         except smtplib.SMTPException as e:
             raise RuntimeError(f"❌ SMTP error occurred: {e}") from e
         except Exception as e:
-            raise RuntimeError(f"❌ An unexpected error occurred while sending email: {e}") from e
-        
+            raise RuntimeError(
+                f"❌ An unexpected error occurred while sending email: {e}"
+            ) from e
+
         return True
