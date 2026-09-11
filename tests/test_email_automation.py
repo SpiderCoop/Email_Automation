@@ -6,8 +6,9 @@ Date:          2026-09-11
 
 import smtplib
 from unittest.mock import MagicMock, patch
+
 import pytest
-import smtplib
+
 from email_automation.email_manager import EmailManager
 
 

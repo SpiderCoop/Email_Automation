@@ -5,6 +5,7 @@ Date:          2026-09-11
 """
 
 import pytest
+
 from email_automation import EmailManager
 
 
