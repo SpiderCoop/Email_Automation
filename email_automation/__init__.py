@@ -1,1 +1,1 @@
-from .email_manager import EmailManager
+from .email_manager import EmailManager as EmailManager
