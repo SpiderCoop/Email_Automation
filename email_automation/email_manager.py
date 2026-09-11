@@ -156,7 +156,11 @@ class EmailManager:
 
         # Enviar correo con conexión segura
         # Obtener todos los destinatarios (to + cc + bcc)
-        all_recipients = (direct_recipients or []) + (copied_recipients or []) + (blind_recipients or [])
+        all_recipients = (
+            (direct_recipients or [])
+            + (copied_recipients or [])
+            + (blind_recipients or [])
+        )
 
         context = ssl.create_default_context()
         try:
