@@ -3,7 +3,7 @@ name = "email_automation_sc"
 version = "1.0.2"
 description = "Un paquete para el envio de correos electronicos automatizados"
 readme = "README.md"
-requires-python = ">=3.6"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [
   { name = "David Jiménez Cooper", email = "david.jimenez.cooper@gmail.com" }

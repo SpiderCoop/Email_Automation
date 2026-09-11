@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main", "develop"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Instalar dependencias
+        run: uv sync --locked
+
+      - name: Revisión de calidad de código (Ruff)
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            mapfile -t py_files < <(git diff --name-only --diff-filter=ACMR "$BASE_SHA" "$HEAD_SHA" -- "*.py")
+          else
+            mapfile -t py_files < <(git ls-files "*.py")
+          fi
+
+          if ((${#py_files[@]} == 0)); then
+            echo "No hay archivos Python para lint."
+            exit 0
+          fi
+
+          # Verifica que el formato sea correcto
+          uv run ruff format --check "${py_files[@]}"
+          
+          # Verifica errores lógicos y de estilo
+          uv run ruff check "${py_files[@]}"
+
+      - name: Ejecutar pruebas automatizadas (Pytest)
+        run: uv run pytest tests/ -v
