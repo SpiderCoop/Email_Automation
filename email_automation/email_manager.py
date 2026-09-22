@@ -14,10 +14,9 @@ import smtplib
 import ssl
 import time
 import uuid
+from collections.abc import Sequence
 from email.message import EmailMessage
-from email.utils import formataddr
 from pathlib import Path
-from typing import Sequence
 
 
 class EmailManager:
@@ -98,28 +97,18 @@ class EmailManager:
                 Si no se especifica ningún destinatario.
         """
 
-        self.direct_recipients = self._clean_recipients(
-            direct_recipients
-        )
+        self.direct_recipients = self._clean_recipients(direct_recipients)
 
-        self.copied_recipients = self._clean_recipients(
-            copied_recipients
-        )
+        self.copied_recipients = self._clean_recipients(copied_recipients)
 
-        self.blind_recipients = self._clean_recipients(
-            blind_recipients
-        )
+        self.blind_recipients = self._clean_recipients(blind_recipients)
 
         self.all_recipients = (
-            self.direct_recipients
-            + self.copied_recipients
-            + self.blind_recipients
+            self.direct_recipients + self.copied_recipients + self.blind_recipients
         )
 
         if not self.all_recipients:
-            raise ValueError(
-                "❌ At least one recipient must be specified."
-            )
+            raise ValueError("❌ At least one recipient must be specified.")
 
     @staticmethod
     def _clean_recipients(
@@ -141,7 +130,6 @@ class EmailManager:
             for recipient in recipients
             if recipient and recipient.strip()
         ]
-    
 
     def set_signature(
         self,
@@ -179,10 +167,8 @@ class EmailManager:
             EmailMessage: Mensaje completo listo para enviar o guardar como borrador.
         """
 
-
         # Verificamos destinatarios antes de construir el mensaje.
         self._validate_recipients()
-
 
         body, prepared_images = self._prepare_inline_images(
             body,
@@ -200,7 +186,6 @@ class EmailManager:
             signature_html,
         )
 
-
         message = EmailMessage()
 
         message["From"] = self.account
@@ -208,7 +193,7 @@ class EmailManager:
         # EmailMessage acepta directamente una lista de destinatarios.
         if self.direct_recipients:
             message["To"] = ", ".join(self.direct_recipients)
-            
+
         if self.copied_recipients:
             message["Cc"] = ", ".join(self.copied_recipients)
 
@@ -216,7 +201,6 @@ class EmailManager:
             message["Bcc"] = ", ".join(self.blind_recipients)
 
         message["Subject"] = subject
-
 
         message.set_content(
             body,
@@ -228,7 +212,6 @@ class EmailManager:
         # --------------------------------------------------------------
 
         for image_data in prepared_images:
-
             self._attach_inline_image(
                 message=message,
                 image_data=image_data,
@@ -239,9 +222,7 @@ class EmailManager:
         # --------------------------------------------------------------
 
         if files:
-
             for file_path in files:
-
                 self._attach_file(
                     message=message,
                     file_path=file_path,
@@ -280,7 +261,6 @@ class EmailManager:
         prepared_images: list[dict[str, object]] = []
 
         for image in inline_images:
-
             path = Path(image)
 
             # ----------------------------------------------------------
@@ -289,14 +269,10 @@ class EmailManager:
             # ----------------------------------------------------------
 
             if not path.is_file():
-
-                raise FileNotFoundError(
-                    f"❌ Image not found: {path}"
-                )
+                raise FileNotFoundError(f"❌ Image not found: {path}")
 
             filename = path.name
             base_filename = path.stem
-
 
             content_id = uuid.uuid4().hex
 
@@ -327,7 +303,6 @@ class EmailManager:
 
         return body, prepared_images
 
-
     def _attach_inline_image(
         self,
         message: EmailMessage,
@@ -349,28 +324,19 @@ class EmailManager:
             path = Path(path)
 
         if not isinstance(filename, str):
-            raise TypeError(
-                "Invalid inline image filename."
-            )
+            raise TypeError("Invalid inline image filename.")
 
         if not isinstance(content_id, str):
-            raise TypeError(
-                "Invalid inline image Content-ID."
-            )
+            raise TypeError("Invalid inline image Content-ID.")
 
         # --------------------------------------------------------------
         # Determinamos el MIME type.
         # --------------------------------------------------------------
 
-        mime_type, _ = mimetypes.guess_type(
-            str(path)
-        )
+        mime_type, _ = mimetypes.guess_type(str(path))
 
         if not mime_type or not mime_type.startswith("image/"):
-
-            raise ValueError(
-                f"❌ Unsupported image MIME type: {path}"
-            )
+            raise ValueError(f"❌ Unsupported image MIME type: {path}")
 
         maintype, subtype = mime_type.split(
             "/",
@@ -382,15 +348,10 @@ class EmailManager:
         # --------------------------------------------------------------
 
         try:
-
             image_bytes = path.read_bytes()
 
         except OSError as e:
-
-            raise FileNotFoundError(
-                f"❌ Error reading inline image {path}: {e}"
-            ) from e
-
+            raise FileNotFoundError(f"❌ Error reading inline image {path}: {e}") from e
 
         message.add_related(
             image_bytes,
@@ -416,14 +377,9 @@ class EmailManager:
         path = Path(file_path)
 
         if not path.is_file():
+            raise FileNotFoundError(f"❌ File not found: {path}")
 
-            raise FileNotFoundError(
-                f"❌ File not found: {path}"
-            )
-
-        mime_type, encoding = mimetypes.guess_type(
-            str(path)
-        )
+        mime_type, encoding = mimetypes.guess_type(str(path))
 
         # --------------------------------------------------------------
         # CORRECCIÓN:
@@ -432,7 +388,6 @@ class EmailManager:
         # --------------------------------------------------------------
 
         if mime_type is None or encoding is not None:
-
             mime_type = "application/octet-stream"
 
         maintype, subtype = mime_type.split(
@@ -441,14 +396,10 @@ class EmailManager:
         )
 
         try:
-
             file_data = path.read_bytes()
 
         except OSError as e:
-
-            raise FileNotFoundError(
-                f"❌ Error reading attachment {path}: {e}"
-            ) from e
+            raise FileNotFoundError(f"❌ Error reading attachment {path}: {e}") from e
 
         # --------------------------------------------------------------
         # CORRECCIÓN:
@@ -488,22 +439,17 @@ class EmailManager:
         # --------------------------------------------------------------
 
         if os.path.isfile(signature):
-
             try:
-
                 with open(
                     signature,
                     "r",
                     encoding="utf-8",
                 ) as signature_file:
-
                     return signature_file.read()
 
             except OSError as e:
-
                 raise RuntimeError(
-                    f"❌ Error reading signature file "
-                    f"{signature}: {e}"
+                    f"❌ Error reading signature file {signature}: {e}"
                 ) from e
 
         # --------------------------------------------------------------
@@ -511,7 +457,6 @@ class EmailManager:
         # --------------------------------------------------------------
 
         if "<" in signature and ">" in signature:
-
             return signature
 
         # --------------------------------------------------------------
@@ -559,12 +504,7 @@ class EmailManager:
         )
 
         if match:
-
-            return (
-                body[:match.start()]
-                + signature_html
-                + body[match.start():]
-            )
+            return body[: match.start()] + signature_html + body[match.start() :]
 
         return body + signature_html
 
@@ -578,7 +518,6 @@ class EmailManager:
         """
 
         if not self.all_recipients:
-
             raise ValueError(
                 "❌ At least one recipient must be specified. "
                 "Use set_recipients() first."
@@ -590,10 +529,8 @@ class EmailManager:
         """
 
         if self.message is None:
-
             raise ValueError(
-                "❌ No email message has been built. "
-                "Call build_message() first."
+                "❌ No email message has been built. Call build_message() first."
             )
 
     # ==================================================================
@@ -615,33 +552,26 @@ class EmailManager:
         self._validate_message()
         self._validate_recipients()
 
-
         message = self.message
 
         if message is None:
-            raise ValueError(
-                "❌ Email message is not available."
-            )
+            raise ValueError("❌ Email message is not available.")
 
         context = ssl.create_default_context()
 
         try:
-
             with smtplib.SMTP(
                 self.smtp_server,
                 self.smtp_port,
                 timeout=30,
             ) as server:
-
                 server.ehlo()
 
                 # ------------------------------------------------------
                 # STARTTLS
                 # ------------------------------------------------------
 
-                server.starttls(
-                    context=context
-                )
+                server.starttls(context=context)
 
                 server.ehlo()
 
@@ -673,14 +603,11 @@ class EmailManager:
                     to_addrs=self.all_recipients,
                 )
 
-            print(
-                "✅ Email sent successfully."
-            )
+            print("✅ Email sent successfully.")
 
             return True
 
         except smtplib.SMTPAuthenticationError as e:
-
             raise RuntimeError(
                 "❌ SMTP authentication failed. "
                 "Verify the credentials and whether SMTP AUTH "
@@ -689,19 +616,14 @@ class EmailManager:
             ) from e
 
         except smtplib.SMTPException as e:
-
-            raise RuntimeError(
-                f"❌ SMTP error occurred: {e}"
-            ) from e
+            raise RuntimeError(f"❌ SMTP error occurred: {e}") from e
 
         except OSError as e:
-
             raise RuntimeError(
                 f"❌ Network/connection error while sending email: {e}"
             ) from e
 
         except Exception as e:
-
             raise RuntimeError(
                 f"❌ An unexpected error occurred while sending email: {e}"
             ) from e
@@ -728,11 +650,9 @@ class EmailManager:
         status, folder_list = imap.list()
 
         if status != "OK" or not folder_list:
-
             return "Drafts"
 
         for folder_bytes in folder_list:
-
             if not folder_bytes:
                 continue
 
@@ -749,10 +669,7 @@ class EmailManager:
             # ----------------------------------------------------------
 
             if "\\drafts" in folder_lower:
-
-                folder_name = self._extract_imap_folder_name(
-                    folder_str
-                )
+                folder_name = self._extract_imap_folder_name(folder_str)
 
                 if folder_name:
                     return folder_name
@@ -761,14 +678,8 @@ class EmailManager:
             # También soportamos nombres comunes.
             # ----------------------------------------------------------
 
-            if (
-                "drafts" in folder_lower
-                or "borradores" in folder_lower
-            ):
-
-                folder_name = self._extract_imap_folder_name(
-                    folder_str
-                )
+            if "drafts" in folder_lower or "borradores" in folder_lower:
+                folder_name = self._extract_imap_folder_name(folder_str)
 
                 if folder_name:
                     return folder_name
@@ -799,7 +710,6 @@ class EmailManager:
         )
 
         if match:
-
             folder_name = match.group(1).strip()
 
             # Eliminamos comillas exteriores.
@@ -808,7 +718,6 @@ class EmailManager:
                 and folder_name.startswith('"')
                 and folder_name.endswith('"')
             ):
-
                 folder_name = folder_name[1:-1]
 
             if folder_name:
@@ -821,7 +730,6 @@ class EmailManager:
         parts = folder_str.split('"')
 
         if parts:
-
             candidate = parts[-1].strip()
 
             if candidate:
@@ -842,18 +750,14 @@ class EmailManager:
         message = self.message
 
         if message is None:
-            raise ValueError(
-                "❌ Email message is not available."
-            )
+            raise ValueError("❌ Email message is not available.")
 
         try:
-
             with imaplib.IMAP4_SSL(
                 self.imap_server,
                 self.imap_port,
                 timeout=30,
             ) as imap:
-
                 # ------------------------------------------------------
                 # LOGIN
                 # ------------------------------------------------------
@@ -864,27 +768,19 @@ class EmailManager:
                 )
 
                 if status != "OK":
-
-                    raise RuntimeError(
-                        "❌ IMAP login failed: "
-                        f"{response}"
-                    )
+                    raise RuntimeError(f"❌ IMAP login failed: {response}")
 
                 # ------------------------------------------------------
                 # Detectamos Drafts.
                 # ------------------------------------------------------
 
-                drafts_folder = self._get_drafts_folder(
-                    imap
-                )
+                drafts_folder = self._get_drafts_folder(imap)
 
                 # ------------------------------------------------------
                 # Fecha en formato IMAP.
                 # ------------------------------------------------------
 
-                date_time = imaplib.Time2Internaldate(
-                    time.time()
-                )
+                date_time = imaplib.Time2Internaldate(time.time())
 
                 # ------------------------------------------------------
                 # CORRECCIÓN:
@@ -893,47 +789,34 @@ class EmailManager:
                 # ------------------------------------------------------
 
                 status, response = imap.append(
-                    f'"{drafts_folder}"', 
+                    f'"{drafts_folder}"',
                     "(\\Draft)",
                     date_time,
                     message.as_bytes(),
                 )
 
                 if status != "OK":
+                    raise RuntimeError(f"❌ IMAP APPEND failed: {response}")
 
-                    raise RuntimeError(
-                        "❌ IMAP APPEND failed: "
-                        f"{response}"
-                    )
-
-            print(
-                "📝 Draft saved successfully."
-            )
+            print("📝 Draft saved successfully.")
 
             return True
 
         except imaplib.IMAP4.error as e:
-
-            raise RuntimeError(
-                f"❌ IMAP error while saving draft: {e}"
-            ) from e
+            raise RuntimeError(f"❌ IMAP error while saving draft: {e}") from e
 
         except OSError as e:
-
             raise RuntimeError(
                 f"❌ Network/connection error while saving draft: {e}"
             ) from e
 
         except Exception as e:
-
-            raise RuntimeError(
-                f"❌ Error saving draft via IMAP: {e}"
-            ) from e
+            raise RuntimeError(f"❌ Error saving draft via IMAP: {e}") from e
 
 
 if __name__ == "__main__":
-
     from dotenv import load_dotenv
+
     load_dotenv()
 
     email_manager = EmailManager(
@@ -942,13 +825,9 @@ if __name__ == "__main__":
     )
 
     # Enviamos un correo de prueba.
-    email_manager.set_recipients(
-        os.getenv("Destinatarios").split(",")
-    )
+    email_manager.set_recipients(os.getenv("Destinatarios").split(","))
     email_manager.build_message(
-        subject="Correo de prueba",
-        body="Este es un correo de prueba."
+        subject="Correo de prueba", body="Este es un correo de prueba."
     )
     email_manager.save_draft()
-    email_manager.send(
-    )
+    email_manager.send()
