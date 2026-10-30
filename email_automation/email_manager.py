@@ -1,11 +1,12 @@
 """
-Description:   Manages sending emails with HTML content, inline images,attachments, and IMAP drafts.
+Description:   Manages sending emails with HTML content, inline images, attachments, and IMAP drafts.
 Author:        David Jiménez Cooper - SpiderCoop
 Date:          2024-03-22
 """
 
 from __future__ import annotations
 
+import base64
 import imaplib
 import mimetypes
 import os
@@ -15,133 +16,197 @@ import ssl
 import time
 import uuid
 from collections.abc import Sequence
+from email import policy
 from email.message import EmailMessage
 from pathlib import Path
+from typing import Literal
+
+PathLike = str | os.PathLike[str]
 
 
 class EmailManager:
     """
-    Gestor de correo electrónico para Microsoft 365 / SMTP + IMAP.
+    Gestor de correo para Microsoft 365 (SMTP + IMAP).
 
-    Permite:
-        - Destinatarios To, Cc y Bcc.
-        - Contenido HTML.
-        - Firma desde archivo HTML o string HTML.
-        - Imágenes inline mediante CID.
-        - Archivos adjuntos.
-        - Envío mediante SMTP + STARTTLS.
-        - Guardado de borradores mediante IMAP.
+    - Destinatarios To, Cc y Bcc.
+    - Cuerpo HTML con firma (archivo HTML o HTML directo).
+    - Imágenes inline (CID) y adjuntos.
+    - Envío por SMTP + STARTTLS y borradores por IMAP.
 
-    NOTA:
-        La autenticación actualmente utiliza usuario/contraseña.
-        Para Microsoft 365 puede ser necesario implementar OAuth 2.0
-        / Modern Authentication.
+    Autenticación (`auth_method`):
+        "password": usuario/contraseña.
+        "token":    access tokens ya obtenidos (XOAUTH2), uno por protocolo.
+        "oauth2":   token obtenido con MSAL (XOAUTH2). Con `client_secret`
+                    usa client credentials (requiere `tenant_id`); sin él,
+                    flujo delegado con Device Code.
+
+    Los endpoints de Gmail están tipados como opciones de servidor, pero
+    `oauth2` usa scopes de Microsoft; para Gmail se requieren credenciales
+    o tokens obtenidos por separado.
+
+    `token_cache_path` persiste la caché MSAL del flujo delegado en texto
+    plano: protege el archivo y no lo incluyas en el control de versiones.
     """
+
+    SMTP_SCOPE = "https://outlook.office.com/SMTP.Send"
+    IMAP_SCOPE = "https://outlook.office.com/IMAP.AccessAsUser.All"
+    AUTH_METHODS = ("password", "token", "oauth2")
+    CLIENT_CREDENTIALS_SCOPE = "https://outlook.office365.com/.default"
 
     def __init__(
         self,
         account: str,
-        password: str,
-        smtp_server: str = "smtp.office365.com",
+        password: str | None = None,
+        smtp_server: Literal[
+            "smtp.office365.com", "smtp.gmail.com"
+        ] = "smtp.office365.com",
         smtp_port: int = 587,
-        imap_server: str = "outlook.office365.com",
+        imap_server: Literal[
+            "outlook.office365.com", "imap.gmail.com"
+        ] = "outlook.office365.com",
         imap_port: int = 993,
+        auth_method: Literal["password", "token", "oauth2"] = "password",
+        smtp_access_token: str | None = None,
+        imap_access_token: str | None = None,
+        client_id: str | None = None,
+        tenant_id: str = "common",
+        client_secret: str | None = None,
+        token_cache_path: PathLike | None = None,
     ) -> None:
+        if auth_method not in self.AUTH_METHODS:
+            raise ValueError(
+                f"Invalid auth_method '{auth_method}'. "
+                f"Use one of: {', '.join(self.AUTH_METHODS)}."
+            )
+
+        if auth_method == "password" and not password:
+            raise ValueError("Password is required.")
+
+        if auth_method == "token" and not (smtp_access_token or imap_access_token):
+            raise ValueError("At least one protocol access token is required.")
+
+        if auth_method == "oauth2":
+            if not client_id:
+                raise ValueError("client_id is required.")
+
+            if client_secret and tenant_id == "common":
+                raise ValueError(
+                    "A specific tenant_id is required for client credentials."
+                )
 
         self.account = account
+        self.auth_method = auth_method
         self._password = password
+        self._access_tokens = {
+            self.SMTP_SCOPE: smtp_access_token,
+            self.IMAP_SCOPE: imap_access_token,
+        }
+
+        self.client_id = client_id
+        self.tenant_id = tenant_id
+        self._client_secret = client_secret
+        self.token_cache_path = Path(token_cache_path) if token_cache_path else None
+        self._msal_app = None
+        self._token_cache = None
 
         self.smtp_server = smtp_server
         self.smtp_port = smtp_port
-
         self.imap_server = imap_server
         self.imap_port = imap_port
 
-        # Mensaje generado por build_message()
         self.message: EmailMessage | None = None
+        self.signature_source: PathLike | None = None
 
-        # Archivo de firma HTML
-        self.signature_file: str | None = None
-
-        # Destinatarios
         self.direct_recipients: list[str] = []
         self.copied_recipients: list[str] = []
         self.blind_recipients: list[str] = []
         self.all_recipients: list[str] = []
 
     # ==================================================================
-    # DESTINATARIOS
+    # DESTINATARIOS Y FIRMA
     # ==================================================================
 
     def set_recipients(
         self,
-        direct_recipients: Sequence[str] | None = None,
-        copied_recipients: Sequence[str] | None = None,
-        blind_recipients: Sequence[str] | None = None,
+        direct_recipients: Sequence[str] | str | None = None,
+        copied_recipients: Sequence[str] | str | None = None,
+        blind_recipients: Sequence[str] | str | None = None,
     ) -> None:
         """
-        Define los destinatarios del correo.
+        Define los destinatarios (To, Cc, Bcc).
 
-        Args:
-            direct_recipients:
-                Destinatarios principales (To).
-
-            copied_recipients:
-                Destinatarios en copia (Cc).
-
-            blind_recipients:
-                Destinatarios en copia oculta (Bcc).
+        Reemplaza por completo los destinatarios anteriores, y no modifica
+        el estado si no hay ninguno válido.
 
         Raises:
-            ValueError:
-                Si no se especifica ningún destinatario.
+            ValueError: Si no se especifica ningún destinatario.
         """
 
-        self.direct_recipients = self._clean_recipients(direct_recipients)
+        direct = self._clean_recipients(direct_recipients)
+        copied = self._clean_recipients(copied_recipients)
+        blind = self._clean_recipients(blind_recipients)
 
-        self.copied_recipients = self._clean_recipients(copied_recipients)
+        if not (direct or copied or blind):
+            raise ValueError("At least one recipient must be specified.")
 
-        self.blind_recipients = self._clean_recipients(blind_recipients)
+        self.direct_recipients = direct
+        self.copied_recipients = copied
+        self.blind_recipients = blind
+        self.all_recipients = direct + copied + blind
 
-        self.all_recipients = (
-            self.direct_recipients + self.copied_recipients + self.blind_recipients
-        )
+        # Mantiene coherente un mensaje ya construido con los nuevos
+        # destinatarios (el borrador y el envío usan estos encabezados).
+        if self.message is not None:
+            self._write_recipient_headers(self.message)
 
-        if not self.all_recipients:
-            raise ValueError("❌ At least one recipient must be specified.")
+    def _write_recipient_headers(self, message: EmailMessage) -> None:
+        """Reescribe los encabezados To, Cc y Bcc en `message`."""
+
+        for header in ("To", "Cc", "Bcc"):
+            del message[header]
+
+        if self.direct_recipients:
+            message["To"] = ", ".join(self.direct_recipients)
+
+        if self.copied_recipients:
+            message["Cc"] = ", ".join(self.copied_recipients)
+
+        # Bcc se omite de los encabezados enviados por SMTP, pero se
+        # conserva para que el borrador IMAP lo incluya.
+        if self.blind_recipients:
+            message["Bcc"] = ", ".join(self.blind_recipients)
 
     @staticmethod
-    def _clean_recipients(
-        recipients: Sequence[str] | None,
-    ) -> list[str]:
+    def _as_path_list(values: Sequence[PathLike] | PathLike | None, name: str) -> list[PathLike]:
+        """Convierte a lista; una ruta suelta se envuelve como `[ruta]`."""
+
+        if isinstance(values, (str, os.PathLike)):
+            return [values]
+
+        return list(values or [])
+
+    @staticmethod
+    def _clean_recipients(recipients: Sequence[str] | str | None) -> list[str]:
+        """Elimina espacios y valores vacíos o no textuales."""
+
+        values = [recipients] if isinstance(recipients, str) else recipients or []
+
+        return [r.strip() for r in values if isinstance(r, str) and r.strip()]
+
+    def set_signature(self, signature_source: PathLike | None = None) -> None:
         """
-        Limpia la lista de destinatarios.
+        Define la firma que se agrega al final del correo.
 
-        Elimina:
-            - espacios al inicio/final
-            - valores vacíos
-        """
-
-        if not recipients:
-            return []
-
-        return [
-            recipient.strip()
-            for recipient in recipients
-            if recipient and recipient.strip()
-        ]
-
-    def set_signature(
-        self,
-        signature_file: str | None = None,
-    ) -> None:
-        """
-        Define el archivo de firma que se agregará al final del correo.
+        Solo modifica la configuración: no lee archivos ni toca el mensaje
+        ya construido. Para aplicar la nueva firma hay que volver a llamar
+        a `build_message()`.
 
         Args:
-            signature_file: Ruta al archivo HTML que contiene la firma.
+            signature_source: Ruta (str o Path) a un archivo HTML, o un
+                string con el HTML de la firma. None la desactiva.
         """
-        self.signature_file = signature_file
+
+        self.signature_source = signature_source
 
     # ==================================================================
     # CONSTRUCCIÓN DEL MENSAJE
@@ -151,86 +216,51 @@ class EmailManager:
         self,
         subject: str,
         body: str,
-        files: Sequence[str | os.PathLike[str]] | None = None,
-        inline_images: Sequence[str | os.PathLike[str]] | None = None,
+        files: Sequence[PathLike] | None = None,
+        inline_images: Sequence[PathLike] | None = None,
     ) -> EmailMessage:
         """
-        Construye el mensaje de correo.
+        Construye el mensaje.
 
         Args:
-            subject: Asunto del correo.
+            subject: Asunto.
             body: Contenido HTML.
-            files: Archivos que serán enviados como attachments.
-            inline_images: Imágenes que serán incrustadas dentro del HTML mediante referencias CID.
+            files: Archivos adjuntos.
+            inline_images: Imágenes referenciadas en el HTML como
+                `cid:<nombre.ext>` o `cid:<nombre>`.
 
-        Returns:
-            EmailMessage: Mensaje completo listo para enviar o guardar como borrador.
+        Raises:
+            ValueError: Si no hay destinatarios.
+            FileNotFoundError: Si falta una imagen, adjunto o firma.
         """
 
-        # Verificamos destinatarios antes de construir el mensaje.
+        # Si la construcción falla no debe quedar un mensaje anterior
+        # disponible para enviar o guardar como borrador.
+        self.message = None
+
         self._validate_recipients()
 
-        body, prepared_images = self._prepare_inline_images(
-            body,
-            inline_images,
-        )
+        files = self._as_path_list(files, "files")
+        inline_images = self._as_path_list(inline_images, "inline_images")
 
-        # --------------------------------------------------------------
-        # Procesamos la firma.
-        # --------------------------------------------------------------
-
-        signature_html = self._load_signature()
-
-        body = self._append_signature(
-            body,
-            signature_html,
-        )
+        body_with_images, images = self._prepare_inline_images(body, inline_images)
+        full_body = self._append_signature(body_with_images, self._load_signature())
 
         message = EmailMessage()
-
         message["From"] = self.account
-
-        # EmailMessage acepta directamente una lista de destinatarios.
-        if self.direct_recipients:
-            message["To"] = ", ".join(self.direct_recipients)
-
-        if self.copied_recipients:
-            message["Cc"] = ", ".join(self.copied_recipients)
-
-        if self.blind_recipients:
-            message["Bcc"] = ", ".join(self.blind_recipients)
-
+        self._write_recipient_headers(message)
         message["Subject"] = subject
+        message.set_content(full_body, subtype="html")
 
-        message.set_content(
-            body,
-            subtype="html",
-        )
+        for path, content_id in images:
+            self._attach_inline_image(message, path, content_id)
 
-        # --------------------------------------------------------------
-        # Agregamos imágenes inline.
-        # --------------------------------------------------------------
-
-        for image_data in prepared_images:
-            self._attach_inline_image(
-                message=message,
-                image_data=image_data,
-            )
-
-        # --------------------------------------------------------------
-        # Agregamos attachments.
-        # --------------------------------------------------------------
-
-        if files:
-            for file_path in files:
-                self._attach_file(
-                    message=message,
-                    file_path=file_path,
-                )
+        for file_path in files:
+            self._attach_file(message, Path(file_path))
 
         self.message = message
 
-        return self.message
+        return message
 
     # ==================================================================
     # IMÁGENES INLINE
@@ -239,181 +269,102 @@ class EmailManager:
     def _prepare_inline_images(
         self,
         body: str,
-        inline_images: Sequence[str | os.PathLike[str]] | None,
-    ) -> tuple[str, list[dict[str, object]]]:
+        inline_images: list[PathLike],
+    ) -> tuple[str, list[tuple[Path, str]]]:
         """
-        Prepara las imágenes inline y reemplaza sus referencias CID.
+        Valida las imágenes y reemplaza sus referencias CID en una pasada.
 
-        Soporta referencias como:
+        Cada imagen responde a `cid:<nombre.ext>` y `cid:<nombre>`. Los
+        nombres completos tienen prioridad sobre los nombres sin extensión.
+        El lookahead evita coincidencias parciales (`cid:logo` dentro de
+        `cid:logo2.png`).
 
-            cid:logo.png
-            cid:logo
-
-        Returns:
-            tuple:
-                - HTML modificado.
-                - Lista de imágenes preparadas.
+        Raises:
+            FileNotFoundError: Si una imagen no existe.
+            ValueError: Si dos imágenes comparten el mismo nombre base
+                (`banner.png` y `banner.jpg`), pues `cid:banner` sería
+                ambiguo.
         """
 
-        if not inline_images:
-            return body, []
-
-        prepared_images: list[dict[str, object]] = []
+        images: list[tuple[Path, str]] = []
+        seen_stems: dict[str, Path] = {}
 
         for image in inline_images:
             path = Path(image)
 
-            # ----------------------------------------------------------
-            # CORRECCIÓN:
-            # Validamos que la imagen exista y sea un archivo.
-            # ----------------------------------------------------------
-
             if not path.is_file():
-                raise FileNotFoundError(f"❌ Image not found: {path}")
+                raise FileNotFoundError(f"Image not found: {path}")
 
-            filename = path.name
-            base_filename = path.stem
+            previous = seen_stems.setdefault(path.stem.casefold(), path)
 
-            content_id = uuid.uuid4().hex
+            if previous is not path:
+                raise ValueError(
+                    "Inline images must have distinct names, even with "
+                    f"different extensions: '{previous.name}' and '{path.name}'."
+                )
 
-            # ----------------------------------------------------------
-            # Reemplazamos ambas variantes:
-            #
-            # cid:logo.png
-            # cid:logo
-            # ----------------------------------------------------------
+            images.append((path, uuid.uuid4().hex))
 
-            body = body.replace(
-                f"cid:{filename}",
-                f"cid:{content_id}",
-            )
+        if not images:
+            return body, images
 
-            body = body.replace(
-                f"cid:{base_filename}",
-                f"cid:{content_id}",
-            )
+        references: dict[str, str] = {}
 
-            prepared_images.append(
-                {
-                    "path": path,
-                    "filename": filename,
-                    "content_id": content_id,
-                }
-            )
+        for path, content_id in images:
+            references[path.name] = content_id
 
-        return body, prepared_images
+        for path, content_id in images:
+            references.setdefault(path.stem, content_id)
 
+        # Más largos primero para que `logo.png` no se resuelva como `logo`.
+        names = sorted(references, key=len, reverse=True)
+        pattern = re.compile(
+            r"cid:(" + "|".join(map(re.escape, names)) + r")(?![\w.\-])"
+        )
+
+        body = pattern.sub(lambda m: f"cid:{references[m.group(1)]}", body)
+
+        return body, images
+
+    @staticmethod
     def _attach_inline_image(
-        self,
         message: EmailMessage,
-        image_data: dict[str, object],
+        path: Path,
+        content_id: str,
     ) -> None:
-        """
-        Adjunta una imagen como contenido inline relacionado con el HTML.
-        """
+        """Adjunta una imagen relacionada con el HTML."""
 
-        path = image_data["path"]
-        filename = image_data["filename"]
-        content_id = image_data["content_id"]
-
-        # --------------------------------------------------------------
-        # Validación de tipos.
-        # --------------------------------------------------------------
-
-        if not isinstance(path, Path):
-            path = Path(path)
-
-        if not isinstance(filename, str):
-            raise TypeError("Invalid inline image filename.")
-
-        if not isinstance(content_id, str):
-            raise TypeError("Invalid inline image Content-ID.")
-
-        # --------------------------------------------------------------
-        # Determinamos el MIME type.
-        # --------------------------------------------------------------
-
-        mime_type, _ = mimetypes.guess_type(str(path))
+        mime_type, _ = mimetypes.guess_type(path)
 
         if not mime_type or not mime_type.startswith("image/"):
-            raise ValueError(f"❌ Unsupported image MIME type: {path}")
+            raise ValueError(f"Unsupported image MIME type: {path}")
 
-        maintype, subtype = mime_type.split(
-            "/",
-            1,
-        )
-
-        # --------------------------------------------------------------
-        # Leemos la imagen.
-        # --------------------------------------------------------------
-
-        try:
-            image_bytes = path.read_bytes()
-
-        except OSError as e:
-            raise FileNotFoundError(f"❌ Error reading inline image {path}: {e}") from e
+        maintype, subtype = mime_type.split("/", 1)
 
         message.add_related(
-            image_bytes,
+            path.read_bytes(),
             maintype=maintype,
             subtype=subtype,
-            cid=content_id,
-            filename=filename,
+            cid=f"<{content_id}>",
+            filename=path.name,
         )
 
-    # ==================================================================
-    # ATTACHMENTS
-    # ==================================================================
-
-    def _attach_file(
-        self,
-        message: EmailMessage,
-        file_path: str | os.PathLike[str],
-    ) -> None:
-        """
-        Agrega un archivo como attachment.
-        """
-
-        path = Path(file_path)
+    @staticmethod
+    def _attach_file(message: EmailMessage, path: Path) -> None:
+        """Adjunta un archivo; usa application/octet-stream si es desconocido."""
 
         if not path.is_file():
-            raise FileNotFoundError(f"❌ File not found: {path}")
+            raise FileNotFoundError(f"File not found: {path}")
 
-        mime_type, encoding = mimetypes.guess_type(str(path))
-
-        # --------------------------------------------------------------
-        # CORRECCIÓN:
-        # Si no podemos determinar el MIME type, utilizamos
-        # application/octet-stream.
-        # --------------------------------------------------------------
+        mime_type, encoding = mimetypes.guess_type(path)
 
         if mime_type is None or encoding is not None:
             mime_type = "application/octet-stream"
 
-        maintype, subtype = mime_type.split(
-            "/",
-            1,
-        )
-
-        try:
-            file_data = path.read_bytes()
-
-        except OSError as e:
-            raise FileNotFoundError(f"❌ Error reading attachment {path}: {e}") from e
-
-        # --------------------------------------------------------------
-        # CORRECCIÓN:
-        # EmailMessage genera automáticamente:
-        #
-        # Content-Type
-        # Content-Disposition
-        # Content-Transfer-Encoding
-        #
-        # y realiza el encoding apropiado.
-        # --------------------------------------------------------------
+        maintype, subtype = mime_type.split("/", 1)
 
         message.add_attachment(
-            file_data,
+            path.read_bytes(),
             maintype=maintype,
             subtype=subtype,
             filename=path.name,
@@ -425,83 +376,40 @@ class EmailManager:
 
     def _load_signature(self) -> str:
         """
-        Carga la firma desde un archivo HTML o directamente desde
-        un string que contenga HTML.
+        Devuelve el HTML de la firma.
+
+        Un `Path` es siempre un archivo. Un `str` se considera HTML si
+        contiene etiquetas; en caso contrario se trata como ruta.
+
+        Raises:
+            FileNotFoundError: Si la firma no es HTML ni un archivo existente.
         """
 
-        if not self.signature_file:
+        source = self.signature_source
+
+        if not source:
             return ""
 
-        signature = self.signature_file
+        if isinstance(source, str) and "<" in source and ">" in source:
+            return source
 
-        # --------------------------------------------------------------
-        # Si es un archivo existente.
-        # --------------------------------------------------------------
+        path = Path(source)
 
-        if os.path.isfile(signature):
-            try:
-                with open(
-                    signature,
-                    "r",
-                    encoding="utf-8",
-                ) as signature_file:
-                    return signature_file.read()
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Signature is neither HTML nor an existing file: {str(source)[:50]}"
+            )
 
-            except OSError as e:
-                raise RuntimeError(
-                    f"❌ Error reading signature file {signature}: {e}"
-                ) from e
-
-        # --------------------------------------------------------------
-        # Si parece ser HTML directamente.
-        # --------------------------------------------------------------
-
-        if "<" in signature and ">" in signature:
-            return signature
-
-        # --------------------------------------------------------------
-        # Mantenemos el comportamiento original:
-        # avisamos y no agregamos firma.
-        # --------------------------------------------------------------
-
-        print(
-            "⚠️ The signature content is not a valid file "
-            "nor does it appear to be HTML: "
-            f"{signature[:30]}..."
-        )
-
-        return ""
+        return path.read_text(encoding="utf-8")
 
     @staticmethod
-    def _append_signature(
-        body: str,
-        signature_html: str,
-    ) -> str:
-        """
-        Inserta la firma antes de </body>.
-
-        Si el HTML no contiene </body>, agrega la firma al final.
-        """
+    def _append_signature(body: str, signature_html: str) -> str:
+        """Inserta la firma antes de </body>, o al final si no existe."""
 
         if not signature_html:
             return body
 
-        # --------------------------------------------------------------
-        # CORRECCIÓN:
-        # Utilizamos una búsqueda case-insensitive.
-        #
-        # Esto permite detectar:
-        #
-        # </body>
-        # </BODY>
-        # </Body>
-        # --------------------------------------------------------------
-
-        match = re.search(
-            r"</body\s*>",
-            body,
-            flags=re.IGNORECASE,
-        )
+        match = re.search(r"</body\s*>", body, flags=re.IGNORECASE)
 
         if match:
             return body[: match.start()] + signature_html + body[match.start() :]
@@ -513,25 +421,176 @@ class EmailManager:
     # ==================================================================
 
     def _validate_recipients(self) -> None:
-        """
-        Verifica que exista al menos un destinatario.
-        """
-
         if not self.all_recipients:
             raise ValueError(
-                "❌ At least one recipient must be specified. "
-                "Use set_recipients() first."
+                "At least one recipient must be specified. Use set_recipients() first."
             )
 
-    def _validate_message(self) -> None:
-        """
-        Verifica que exista un mensaje construido.
-        """
-
+    def _require_message(self) -> EmailMessage:
         if self.message is None:
             raise ValueError(
-                "❌ No email message has been built. Call build_message() first."
+                "No email message has been built. Call build_message() first."
             )
+
+        return self.message
+
+    # ==================================================================
+    # AUTENTICACIÓN
+    # ==================================================================
+
+    def _load_token_cache(self, msal):
+        """Crea la caché MSAL y la hidrata desde `token_cache_path`."""
+
+        self._token_cache = msal.SerializableTokenCache()
+
+        path = self.token_cache_path
+
+        if path and path.is_file():
+            try:
+                self._token_cache.deserialize(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                # Caché ilegible o corrupta: se vuelve a autenticar.
+                pass
+
+        return self._token_cache
+
+    def _save_token_cache(self) -> None:
+        cache = self._token_cache
+
+        if cache is not None and self.token_cache_path and cache.has_state_changed:
+            self.token_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self.token_cache_path.write_text(cache.serialize(), encoding="utf-8")
+
+    def _get_access_token(self, scope: str) -> str:
+        """Devuelve un access token para el scope (token directo o MSAL)."""
+
+        if self.auth_method == "token":
+            token = self._access_tokens[scope]
+
+            if not token:
+                raise ValueError(f"No access token was provided for scope {scope}.")
+
+            return token
+
+        try:
+            import msal
+        except ImportError as e:
+            raise RuntimeError(
+                "The 'msal' package is required for OAuth 2.0 (pip install msal)."
+            ) from e
+
+        authority = f"https://login.microsoftonline.com/{self.tenant_id}"
+
+        if self._client_secret:
+            if self._msal_app is None:
+                self._msal_app = msal.ConfidentialClientApplication(
+                    self.client_id,
+                    authority=authority,
+                    client_credential=self._client_secret,
+                )
+
+            # Client credentials solo admite ".default" del recurso de
+            # Exchange Online, común a SMTP e IMAP.
+            result = self._msal_app.acquire_token_for_client(
+                scopes=[self.CLIENT_CREDENTIALS_SCOPE]
+            )
+        else:
+            if self._msal_app is None:
+                self._msal_app = msal.PublicClientApplication(
+                    self.client_id,
+                    authority=authority,
+                    token_cache=self._load_token_cache(msal),
+                )
+
+            result = None
+            accounts = self._msal_app.get_accounts(username=self.account)
+
+            if accounts:
+                result = self._msal_app.acquire_token_silent(
+                    [scope], account=accounts[0]
+                )
+
+            if not result:
+                flow = self._msal_app.initiate_device_flow(scopes=[scope])
+
+                if "user_code" not in flow:
+                    error = flow.get("error", "unknown_error")
+                    description = flow.get(
+                        "error_description", "Could not initiate device flow."
+                    )
+                    raise RuntimeError(f"Device flow failed: {error} - {description}")
+
+                print(flow["message"])
+                result = self._msal_app.acquire_token_by_device_flow(flow)
+
+            self._save_token_cache()
+
+        if not isinstance(result, dict):
+            raise TypeError("MSAL returned an invalid token response.")
+
+        token = result.get("access_token")
+
+        if not token:
+            error = result.get("error", "unknown_error")
+            description = result.get(
+                "error_description", "Access token was not returned."
+            )
+            raise RuntimeError(
+                f"Could not obtain access token: {error} - {description}"
+            )
+
+        return token
+
+    def _xoauth2_string(self, token: str) -> str:
+        return f"user={self.account}\x01auth=Bearer {token}\x01\x01"
+
+    def _authenticate_smtp(self, server: smtplib.SMTP) -> None:
+        """
+        Autentica SMTP (tras STARTTLS).
+
+        Un fallo lanza smtplib.SMTPAuthenticationError.
+        """
+
+        if self.auth_method == "password":
+            server.login(self.account, self._password)
+            return
+
+        auth_string = self._xoauth2_string(self._get_access_token(self.SMTP_SCOPE))
+
+        # smtplib codifica en base64 y exige que el callback retorne str.
+        # Llama sin argumentos para la respuesta inicial; ante un desafío
+        # (error del servidor) se responde vacío para cerrar el intercambio.
+        def auth_callback(challenge=None) -> str:
+            if challenge is not None:
+                return ""
+
+            return auth_string
+
+        server.auth("XOAUTH2", auth_callback, initial_response_ok=True)
+
+    def _authenticate_imap(self, imap: imaplib.IMAP4) -> None:
+        """Autentica IMAP; el callback de imaplib debe retornar bytes."""
+
+        if self.auth_method == "password":
+            status, response = imap.login(self.account, self._password)
+        else:
+            auth_bytes = self._xoauth2_string(
+                self._get_access_token(self.IMAP_SCOPE)
+            ).encode()
+
+            # imaplib invoca el callback primero con el "+" vacío del
+            # servidor; un desafío con contenido es un error y se responde
+            # vacío en lugar de reenviar el token.
+            def auth_callback(challenge: bytes | None) -> bytes:
+                if challenge:
+                    return b""
+
+                return auth_bytes
+
+            status, response = imap.authenticate("XOAUTH2", auth_callback)
+
+        if status != "OK":
+            raise RuntimeError(f"IMAP authentication failed: {response}")
 
     # ==================================================================
     # ENVÍO SMTP
@@ -539,279 +598,207 @@ class EmailManager:
 
     def send(self) -> bool:
         """
-        Envía el correo mediante SMTP + STARTTLS.
-
-        Returns:
-            True si el correo fue enviado correctamente.
+        Envía el correo por SMTP + STARTTLS.
 
         Raises:
-            RuntimeError:
-                Si ocurre un error durante el envío.
+            RuntimeError: Si falla la autenticación, el protocolo o la red.
         """
 
-        self._validate_message()
-        self._validate_recipients()
-
-        message = self.message
-
-        if message is None:
-            raise ValueError("❌ Email message is not available.")
-
-        context = ssl.create_default_context()
+        message = self._require_message()
 
         try:
-            with smtplib.SMTP(
-                self.smtp_server,
-                self.smtp_port,
-                timeout=30,
-            ) as server:
+            with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=30) as server:
+                server.ehlo()
+                server.starttls(context=ssl.create_default_context())
                 server.ehlo()
 
-                # ------------------------------------------------------
-                # STARTTLS
-                # ------------------------------------------------------
+                self._authenticate_smtp(server)
 
-                server.starttls(context=context)
-
-                server.ehlo()
-
-                # ------------------------------------------------------
-                # AUTENTICACIÓN
-                #
-                # NOTA:
-                # Microsoft 365 puede requerir OAuth 2.0.
-                # ------------------------------------------------------
-
-                server.login(
-                    self.account,
-                    self._password,
-                )
-
-                # ------------------------------------------------------
-                # CORRECCIÓN:
-                #
-                # send_message() puede utilizar directamente el
-                # EmailMessage.
-                #
-                # Sin embargo, pasamos recipients explícitamente para
-                # asegurarnos de incluir BCC.
-                # ------------------------------------------------------
-
-                server.send_message(
+                # Destinatarios explícitos para incluir Bcc. Devuelve un
+                # dict con los rechazados si la entrega fue parcial.
+                refused = server.send_message(
                     message,
                     from_addr=self.account,
                     to_addrs=self.all_recipients,
                 )
 
-            print("✅ Email sent successfully.")
-
-            return True
+            if refused:
+                rejected = ", ".join(refused)
+                raise RuntimeError(
+                    f"Email was partially delivered. Rejected recipients: {rejected}"
+                )
 
         except smtplib.SMTPAuthenticationError as e:
             raise RuntimeError(
-                "❌ SMTP authentication failed. "
-                "Verify the credentials and whether SMTP AUTH "
-                "is enabled for the mailbox. "
-                "For Microsoft 365, OAuth 2.0 may be required."
+                "SMTP authentication failed. Verify the credentials and that "
+                "SMTP AUTH is enabled for the mailbox (Microsoft 365 may "
+                "require OAuth 2.0)."
             ) from e
 
         except smtplib.SMTPException as e:
-            raise RuntimeError(f"❌ SMTP error occurred: {e}") from e
+            raise RuntimeError(f"SMTP error occurred: {e}") from e
 
         except OSError as e:
-            raise RuntimeError(
-                f"❌ Network/connection error while sending email: {e}"
-            ) from e
+            raise RuntimeError(f"Network error while sending email: {e}") from e
 
-        except Exception as e:
-            raise RuntimeError(
-                f"❌ An unexpected error occurred while sending email: {e}"
-            ) from e
+        print("✅ Email sent successfully.")
+
+        return True
 
     # ==================================================================
     # IMAP - BORRADORES
     # ==================================================================
 
-    def _get_drafts_folder(
-        self,
-        imap: imaplib.IMAP4_SSL,
-    ) -> str:
-        """
-        Busca dinámicamente el nombre de la carpeta de borradores.
-
-        Intenta detectar:
-            - \\Drafts
-            - Drafts
-            - Borradores
-
-        Si no encuentra ninguna, devuelve "Drafts".
-        """
-
-        status, folder_list = imap.list()
-
-        if status != "OK" or not folder_list:
-            return "Drafts"
-
-        for folder_bytes in folder_list:
-            if not folder_bytes:
-                continue
-
-            folder_str = folder_bytes.decode(
-                "utf-8",
-                errors="ignore",
-            )
-
-            folder_lower = folder_str.lower()
-
-            # ----------------------------------------------------------
-            # CORRECCIÓN:
-            # Detectamos el flag estándar IMAP \Drafts.
-            # ----------------------------------------------------------
-
-            if "\\drafts" in folder_lower:
-                folder_name = self._extract_imap_folder_name(folder_str)
-
-                if folder_name:
-                    return folder_name
-
-            # ----------------------------------------------------------
-            # También soportamos nombres comunes.
-            # ----------------------------------------------------------
-
-            if "drafts" in folder_lower or "borradores" in folder_lower:
-                folder_name = self._extract_imap_folder_name(folder_str)
-
-                if folder_name:
-                    return folder_name
-
-        return "Drafts"
+    _LIST_RESPONSE = re.compile(
+        r"""^\((?P<attrs>[^)]*)\)\s+                 # atributos
+            (?:"(?P<delim>(?:[^"\\]|\\.)*)"|NIL)\s+  # delimitador o NIL
+            (?P<name>.+)$                            # nombre del buzón
+        """,
+        re.VERBOSE | re.DOTALL,
+    )
 
     @staticmethod
-    def _extract_imap_folder_name(
-        folder_str: str,
-    ) -> str | None:
+    def _decode_imap_utf7(name: str) -> str:
+        """Decodifica un nombre de buzón en Modified UTF-7 (RFC 3501)."""
+
+        def replace(match: re.Match[str]) -> str:
+            encoded = match.group(1)
+
+            if not encoded:
+                return "&"
+
+            encoded = encoded.replace(",", "/")
+            encoded += "=" * (-len(encoded) % 4)
+
+            return base64.b64decode(encoded).decode("utf-16-be")
+
+        try:
+            return re.sub(r"&([^-]*)-", replace, name)
+        except ValueError:
+            return name
+
+    @classmethod
+    def _parse_list_response(
+        cls, item: bytes | tuple | None
+    ) -> tuple[set[str], str] | None:
         """
-        Intenta extraer el nombre de la carpeta de una respuesta
-        IMAP LIST.
+        Interpreta una línea de respuesta LIST de imaplib.
 
-        Ejemplo típico:
+        Admite delimitador entrecomillado o NIL, nombre entrecomillado con
+        escapes, atom y literal (imaplib lo entrega como tupla).
 
-            (\\Drafts) "/" Drafts
-
+        Returns:
+            (atributos en minúsculas, nombre tal como viaja en el protocolo,
+            es decir, en Modified UTF-7), o None si no se pudo interpretar.
         """
 
-        # --------------------------------------------------------------
-        # Intentamos obtener la parte posterior al delimitador.
-        # --------------------------------------------------------------
+        literal: bytes | None = None
 
-        match = re.search(
-            r'\)\s+"[^"]*"\s+(.+)$',
-            folder_str,
-        )
+        if isinstance(item, tuple):
+            item, literal = item[0], item[1]
 
-        if match:
-            folder_name = match.group(1).strip()
+        if not item:
+            return None
 
-            # Eliminamos comillas exteriores.
-            if (
-                len(folder_name) >= 2
-                and folder_name.startswith('"')
-                and folder_name.endswith('"')
-            ):
-                folder_name = folder_name[1:-1]
+        match = cls._LIST_RESPONSE.match(item.decode("utf-8", errors="replace"))
 
-            if folder_name:
-                return folder_name
+        if not match:
+            return None
 
-        # --------------------------------------------------------------
-        # Fallback para formatos diferentes.
-        # --------------------------------------------------------------
+        attributes = {a.lower() for a in match.group("attrs").split()}
+        name = match.group("name").strip()
 
-        parts = folder_str.split('"')
+        if literal is not None:
+            name = literal.decode("utf-8", errors="replace")
+        elif name.startswith('"') and name.endswith('"') and len(name) >= 2:
+            name = re.sub(r"\\(.)", r"\1", name[1:-1])
 
-        if parts:
-            candidate = parts[-1].strip()
+        return (attributes, name) if name else None
 
-            if candidate:
-                return candidate
+    def _get_drafts_folder(self, imap: imaplib.IMAP4) -> str:
+        """
+        Devuelve el nombre (en formato de protocolo) de la carpeta de
+        borradores.
 
-        return None
+        Usa primero el atributo especial `\\Drafts`. Solo si ningún buzón
+        lo tiene, busca un buzón llamado exactamente "Drafts" o
+        "Borradores" (sin distinguir mayúsculas); si tampoco existe,
+        devuelve "Drafts".
+        """
+
+        status, items = imap.list()
+
+        if status != "OK" or not items:
+            return "Drafts"
+
+        by_name: str | None = None
+
+        for item in items:
+            parsed = self._parse_list_response(item)
+
+            if parsed is None:
+                continue
+
+            attributes, name = parsed
+
+            if "\\noselect" in attributes:
+                continue
+
+            if "\\drafts" in attributes:
+                return name
+
+            decoded = self._decode_imap_utf7(name).casefold()
+
+            if by_name is None and decoded in ("drafts", "borradores"):
+                by_name = name
+
+        return by_name or "Drafts"
+
+    @staticmethod
+    def _quote_imap_mailbox(mailbox: str) -> str:
+        """Entrecomilla y escapa un nombre de buzón IMAP."""
+
+        escaped = mailbox.replace("\\", "\\\\").replace('"', '\\"')
+
+        return f'"{escaped}"'
 
     def save_draft(self) -> bool:
         """
-        Guarda el mensaje como borrador mediante IMAP.
+        Guarda el mensaje como borrador por IMAP.
 
-        Returns:
-            True si el borrador se guardó correctamente.
+        Raises:
+            RuntimeError: Si falla la autenticación, el protocolo o la red.
         """
 
-        self._validate_message()
-
-        message = self.message
-
-        if message is None:
-            raise ValueError("❌ Email message is not available.")
+        message = self._require_message()
 
         try:
             with imaplib.IMAP4_SSL(
-                self.imap_server,
-                self.imap_port,
-                timeout=30,
+                self.imap_server, self.imap_port, timeout=30
             ) as imap:
-                # ------------------------------------------------------
-                # LOGIN
-                # ------------------------------------------------------
+                self._authenticate_imap(imap)
 
-                status, response = imap.login(
-                    self.account,
-                    self._password,
-                )
-
-                if status != "OK":
-                    raise RuntimeError(f"❌ IMAP login failed: {response}")
-
-                # ------------------------------------------------------
-                # Detectamos Drafts.
-                # ------------------------------------------------------
-
-                drafts_folder = self._get_drafts_folder(imap)
-
-                # ------------------------------------------------------
-                # Fecha en formato IMAP.
-                # ------------------------------------------------------
-
-                date_time = imaplib.Time2Internaldate(time.time())
-
-                # ------------------------------------------------------
-                # CORRECCIÓN:
-                # EmailMessage proporciona as_bytes(), por lo que no
-                # necesitamos reconstruir manualmente el MIME.
-                # ------------------------------------------------------
+                mailbox = self._quote_imap_mailbox(self._get_drafts_folder(imap))
 
                 status, response = imap.append(
-                    f'"{drafts_folder}"',
+                    mailbox,
                     "(\\Draft)",
-                    date_time,
-                    message.as_bytes(),
+                    imaplib.Time2Internaldate(time.time()),
+                    message.as_bytes(policy=policy.SMTP),
                 )
 
                 if status != "OK":
-                    raise RuntimeError(f"❌ IMAP APPEND failed: {response}")
-
-            print("📝 Draft saved successfully.")
-
-            return True
+                    raise RuntimeError(f"IMAP APPEND failed: {response}")
 
         except imaplib.IMAP4.error as e:
-            raise RuntimeError(f"❌ IMAP error while saving draft: {e}") from e
+            raise RuntimeError(f"IMAP error while saving draft: {e}") from e
 
         except OSError as e:
-            raise RuntimeError(
-                f"❌ Network/connection error while saving draft: {e}"
-            ) from e
+            raise RuntimeError(f"Network error while saving draft: {e}") from e
 
-        except Exception as e:
-            raise RuntimeError(f"❌ Error saving draft via IMAP: {e}") from e
+        print("📝 Draft saved successfully.")
+
+        return True
 
 
 if __name__ == "__main__":
@@ -819,15 +806,23 @@ if __name__ == "__main__":
 
     load_dotenv()
 
+    def _require_env(name: str) -> str:
+        value = os.getenv(name, "").strip()
+
+        if not value:
+            raise SystemExit(f"Missing required environment variable: {name}")
+
+        return value
+
     email_manager = EmailManager(
-        account=os.getenv("Cuenta"),
-        password=os.getenv("password"),
+        account=_require_env("Cuenta"),
+        password=_require_env("password"),
     )
 
-    # Enviamos un correo de prueba.
-    email_manager.set_recipients(os.getenv("Destinatarios").split(","))
+    email_manager.set_recipients(_require_env("Destinatarios").split(","))
     email_manager.build_message(
-        subject="Correo de prueba", body="Este es un correo de prueba."
+        subject="Correo de prueba",
+        body="Este es un correo de prueba.",
     )
-    email_manager.save_draft()
+    # email_manager.save_draft()
     email_manager.send()
