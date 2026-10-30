@@ -8,28 +8,40 @@ import pytest
 
 from email_automation import EmailManager
 
-
-@pytest.fixture
-def email_manager():
-    return EmailManager(account="test@example.com", password="secret_password")
+ACCOUNT = "test@example.com"
+PASSWORD = "secret_password"
 
 
 @pytest.fixture
-def temp_signature(tmp_path):
-    sig_file = tmp_path / "signature.html"
-    sig_file.write_text("<p>Atentamente, Soporte</p>", encoding="utf-8")
-    return str(sig_file)
+def manager():
+    """Manager con contraseña y un destinatario ya definido."""
+    m = EmailManager(account=ACCOUNT, password=PASSWORD)
+    m.set_recipients(["to@example.com"])
+    return m
 
 
 @pytest.fixture
-def temp_file(tmp_path):
+def built_manager(manager):
+    manager.build_message(subject="Asunto", body="<html><body>Hola</body></html>")
+    return manager
+
+
+@pytest.fixture
+def signature_file(tmp_path):
+    f = tmp_path / "signature.html"
+    f.write_text("<p>Atentamente, Soporte</p>", encoding="utf-8")
+    return f
+
+
+@pytest.fixture
+def attachment(tmp_path):
     f = tmp_path / "document.txt"
     f.write_text("Contenido de prueba", encoding="utf-8")
-    return str(f)
+    return f
 
 
 @pytest.fixture
-def temp_image(tmp_path):
+def image(tmp_path):
     img = tmp_path / "logo.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\n")
-    return str(img)
+    return img
