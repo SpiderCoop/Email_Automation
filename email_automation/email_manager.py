@@ -177,7 +177,9 @@ class EmailManager:
             message["Bcc"] = ", ".join(self.blind_recipients)
 
     @staticmethod
-    def _as_path_list(values: Sequence[PathLike] | PathLike | None, name: str) -> list[PathLike]:
+    def _as_path_list(
+        values: Sequence[PathLike] | PathLike | None, name: str
+    ) -> list[PathLike]:
         """Convierte a lista; una ruta suelta se envuelve como `[ruta]`."""
 
         if isinstance(values, (str, os.PathLike)):

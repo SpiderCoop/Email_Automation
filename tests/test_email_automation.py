@@ -219,7 +219,9 @@ class TestInlineImages:
     @pytest.mark.parametrize("as_str", [True, False])
     def test_single_image_path_is_wrapped(self, manager, image, as_str):
         single = str(image) if as_str else image
-        msg = manager.build_message("s", "<img src='cid:logo.png'>", inline_images=single)
+        msg = manager.build_message(
+            "s", "<img src='cid:logo.png'>", inline_images=single
+        )
         assert [p for p in msg.walk() if p.get("Content-ID")]
 
     def test_base_name_reference(self, manager, image):
